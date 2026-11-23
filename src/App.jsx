@@ -11,7 +11,7 @@ const templates = [
 
 function App() {
   const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+  import.meta.env.VITE_API_BASE_URL || "https://webcraft-ai-b8i4.onrender.com";
   const [prompt, setPrompt] = useState("");
   const [workspace, setWorkspace] = useState(false);
   const [selected, setSelected] = useState("Business");
