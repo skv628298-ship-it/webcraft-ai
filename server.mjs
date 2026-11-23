@@ -2,25 +2,30 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CHECK API KEY
-if (!process.env.GEMINI_API_KEY) {
-  console.error("Gemini API key missing. Check your .env file.");
+// ==========================================
+// GROQ CONFIGURATION
+// ==========================================
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+
+const GROQ_MODEL =
+  process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+
+if (!GROQ_API_KEY) {
+  console.error("Groq API key missing. Check your environment variables.");
   process.exit(1);
 }
 
-// INITIALIZE GEMINI
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
-
+// ==========================================
 // CORS CONFIGURATION
+// ==========================================
+
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
   .map((url) => url.trim())
@@ -43,76 +48,150 @@ app.use(
 
 app.use(express.json({ limit: "5mb" }));
 
+// ==========================================
 // CLEAN HTML RESPONSE
-const cleanHtml = (html) => {
+// ==========================================
+
+function cleanHtml(html) {
   return html
     .replace(/^```(?:html)?\s*/i, "")
     .replace(/\s*```$/, "")
     .trim();
-};
+}
 
-// FRIENDLY ERROR MESSAGES
-const getFriendlyError = (error) => {
-  const message = error?.message || "";
-  const status = error?.status;
+// ==========================================
+// GROQ API REQUEST WITH RETRIES
+// ==========================================
 
-  if (status === 503 || message.includes("503")) {
-    return "Gemini is currently busy. Please wait a minute and try again.";
-  }
+async function generateWithGroq(messages) {
+  let lastError;
 
-  if (status === 429 || message.includes("429")) {
-    return "Gemini API request limit reached. Please try again later.";
-  }
-
-  if (status === 400 || message.includes("400")) {
-    return "Invalid request. Please check your input.";
-  }
-
-  console.error("Gemini error details:", error);
-
-  return "Something went wrong. Please try again.";
-};
-
-// RETRY TEMPORARY GEMINI ERRORS
-const generateWithRetry = async (request) => {
-  const maxAttempts = 3;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      return await ai.models.generateContent(request);
-    } catch (error) {
-      const status = error?.status;
+      console.log(
+        `Groq request attempt ${attempt}/2 using ${GROQ_MODEL}...`
+      );
 
-      const isTemporary =
-        status === 503 ||
-        status === 500 ||
-        status === 429 ||
-        status === 504;
+      const response = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: GROQ_MODEL,
+            messages,
+            max_completion_tokens: 12000,
+            temperature: 0.7,
+          }),
+          signal: AbortSignal.timeout(120000),
+        }
+      );
 
-      if (!isTemporary || attempt === maxAttempts) {
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const error = new Error(
+          data?.error?.message || `Groq API error: ${response.status}`
+        );
+
+        error.status = response.status;
         throw error;
       }
 
-      const delay = attempt * 3000;
+      const content = data?.choices?.[0]?.message?.content;
 
-      console.log(
-        `Gemini temporarily unavailable. Retry ${attempt + 1}/${maxAttempts} in ${delay / 1000}s...`
-      );
+      if (!content || !content.trim()) {
+        throw new Error("Groq returned an empty response.");
+      }
 
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      console.log("Groq response received successfully.");
+
+      return content;
+
+    } catch (error) {
+      lastError = error;
+
+      const status = Number(error.status || 0);
+
+      const temporary =
+        [408, 429, 500, 502, 503, 504].includes(status) ||
+        error.name === "TimeoutError" ||
+        error.name === "AbortError" ||
+        error.name === "TypeError";
+
+      console.error("Groq request failed:", error.message);
+
+      if (!temporary || attempt === 2) {
+        throw error;
+      }
+
+      console.log("Temporary Groq error. Retrying in 3 seconds...");
+
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
-};
 
+  throw lastError || new Error("Groq request failed.");
+}
+
+// ==========================================
+// FRIENDLY ERROR MESSAGES
+// ==========================================
+
+function getFriendlyError(error) {
+  const status = Number(error.status || 0);
+  const message = error.message || "";
+
+  if (status === 401 || status === 403) {
+    return "Groq authentication failed. Please check your API key.";
+  }
+
+  if (status === 429) {
+    return "Groq API rate limit reached. Please wait and try again.";
+  }
+
+  if (status === 400) {
+    return `Groq rejected the request: ${message}`;
+  }
+
+  if (status === 413) {
+    return "The website is too large to edit. Try a smaller website.";
+  }
+
+  if ([500, 502, 503, 504].includes(status)) {
+    return "Groq is temporarily unavailable. Please try again shortly.";
+  }
+
+  if (
+    error.name === "TimeoutError" ||
+    error.name === "AbortError"
+  ) {
+    return "The AI request took too long. Please try again.";
+  }
+
+  console.error("Unexpected error:", error);
+
+  return "Something went wrong. Please try again.";
+}
+
+// ==========================================
 // BACKEND HEALTH CHECK
+// ==========================================
+
 app.get("/", (req, res) => {
-  res.send("WebCraft AI backend is running!");
+  res.send("WebCraft AI backend is running with Groq!");
 });
 
+// ==========================================
 // GENERATE WEBSITE
+// ==========================================
+
 app.post("/api/generate", async (req, res) => {
   try {
-    const { prompt } = req.body;
+    const { prompt } = req.body || {};
 
     if (
       typeof prompt !== "string" ||
@@ -124,16 +203,15 @@ app.post("/api/generate", async (req, res) => {
       });
     }
 
-    console.log("Generating website...");
+    console.log("Generating website with Groq...");
 
-    const response = await generateWithRetry({
-      model: "gemini-3.5-flash-lite",
-      contents: `
-You are WebCraft AI, an expert website developer.
+    const html = await generateWithGroq([
+      {
+        role: "system",
+        content: `
+You are WebCraft AI, an expert website designer and developer.
 
-Create a complete, attractive website based on this description:
-
-${prompt}
+Create beautiful, complete, professional websites from user descriptions.
 
 Requirements:
 - Return a complete HTML document.
@@ -142,41 +220,47 @@ Requirements:
 - Make the website responsive on mobile, tablet and desktop.
 - Use modern typography, attractive colors and spacing.
 - Include working navigation and interactive elements.
+- Use suitable image URLs when images are requested.
 - Do not use Markdown code fences.
 - Return HTML only.
-      `,
-    });
+        `,
+      },
+      {
+        role: "user",
+        content: `Create a complete website based on this description:\n\n${prompt}`,
+      },
+    ]);
 
-    const html = cleanHtml(response.text || "");
+    const cleanedHtml = cleanHtml(html);
 
-    if (!html) {
-      throw new Error("Gemini returned an empty response.");
+    if (!cleanedHtml) {
+      throw new Error("Groq returned an empty website.");
     }
 
     console.log("Website generated successfully.");
 
-    res.json({ html });
+    return res.json({ html: cleanedHtml });
 
   } catch (error) {
     console.error("Website generation error:", error);
 
-    const status =
-      Number.isInteger(error.status) &&
-      error.status >= 400 &&
-      error.status <= 599
-        ? error.status
-        : 500;
+    const status = Number(error.status);
 
-    res.status(status).json({
+    return res.status(
+      status >= 400 && status <= 599 ? status : 500
+    ).json({
       error: getFriendlyError(error),
     });
   }
 });
 
+// ==========================================
 // EDIT EXISTING WEBSITE
+// ==========================================
+
 app.post("/api/edit", async (req, res) => {
   try {
-    const { html, instruction } = req.body;
+    const { html, instruction } = req.body || {};
 
     if (
       typeof html !== "string" ||
@@ -198,68 +282,73 @@ app.post("/api/edit", async (req, res) => {
       });
     }
 
-    console.log("Editing website...");
+    console.log("Editing website with Groq...");
 
-    const response = await generateWithRetry({
-      model: "gemini-3.8-flash",
-      contents: `
+    const updatedHtml = await generateWithGroq([
+      {
+        role: "system",
+        content: `
 You are WebCraft AI, an expert website designer and developer.
 
-The user has an existing website and wants to modify it.
+Modify the supplied website according to the user's instructions.
 
-EXISTING WEBSITE HTML:
-${html}
-
-USER'S REQUESTED CHANGES:
-${instruction}
-
-IMPORTANT REQUIREMENTS:
-- Apply the requested changes to the existing website.
-- Preserve existing sections and functionality unless the user asks to change them.
+Requirements:
+- Preserve existing sections and functionality unless asked to change them.
 - Keep the website responsive on mobile, tablet and desktop.
 - Preserve existing styling where possible.
 - Return the complete updated HTML document.
-- Include all CSS inside style tags.
+- Include CSS inside style tags.
 - Include JavaScript inside script tags when needed.
 - Do not return explanations or Markdown code fences.
 - Return HTML only.
-      `,
-    });
+        `,
+      },
+      {
+        role: "user",
+        content: `
+EXISTING WEBSITE HTML:
+${html}
 
-    const updatedHtml = cleanHtml(response.text || "");
+REQUESTED CHANGES:
+${instruction}
 
-    if (!updatedHtml) {
-      throw new Error("Gemini returned an empty edited website.");
+Return the complete updated HTML document.
+        `,
+      },
+    ]);
+
+    const cleanedHtml = cleanHtml(updatedHtml);
+
+    if (!cleanedHtml) {
+      throw new Error("Groq returned an empty edited website.");
     }
 
     console.log("Website edited successfully.");
 
-    res.json({ html: updatedHtml });
+    return res.json({ html: cleanedHtml });
 
   } catch (error) {
     console.error("Website editing error:", error);
 
-    const status =
-      Number.isInteger(error.status) &&
-      error.status >= 400 &&
-      error.status <= 599
-        ? error.status
-        : 500;
+    const status = Number(error.status);
 
-    res.status(status).json({
+    return res.status(
+      status >= 400 && status <= 599 ? status : 500
+    ).json({
       error: getFriendlyError(error),
     });
   }
 });
 
+// ==========================================
 // START SERVER
+// ==========================================
+
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`WebCraft AI backend running on port ${PORT}`);
+  console.log("AI provider: Groq");
+  console.log(`AI model: ${GROQ_MODEL}`);
   console.log("Server listening:", server.listening);
-});
-
-server.on("close", () => {
-  console.log("WARNING: Server has closed!");
 });
 
 server.on("error", (error) => {
