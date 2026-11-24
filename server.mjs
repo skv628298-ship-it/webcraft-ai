@@ -8,6 +8,9 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Parse JSON requests from WebCraft AI
+app.use(express.json({ limit: "1mb" }));
+
 // ==========================================
 // GROQ CONFIGURATION
 // ==========================================
