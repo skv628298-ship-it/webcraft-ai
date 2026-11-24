@@ -23,21 +23,30 @@ if (!GROQ_API_KEY) {
 }
 
 // ==========================================
-// CORS CONFIGURATION
-// ==========================================
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
   .map((url) => url.trim())
   .filter(Boolean);
 
+const capacitorOrigins = [
+  "https://localhost",
+  "http://localhost",
+  "capacitor://localhost",
+];
+
 app.use(
   cors({
     origin: (origin, callback) => {
       const isLocalhost =
-        /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin || "");
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || "");
 
-      if (!origin || isLocalhost || allowedOrigins.includes(origin)) {
+      if (
+        !origin ||
+        isLocalhost ||
+        capacitorOrigins.includes(origin) ||
+        allowedOrigins.includes(origin)
+      ) {
         return callback(null, true);
       }
 
@@ -45,8 +54,6 @@ app.use(
     },
   })
 );
-
-app.use(express.json({ limit: "5mb" }));
 
 // ==========================================
 // CLEAN HTML RESPONSE
